@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stark Labs - Infinite Power HUD</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #030305;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        #webcam {
+            display: none;
+        }
+        #hud-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #00ffcc;
+            text-shadow: 0 0 8px #00ffcc;
+            pointer-events: none;
+            z-index: 10;
+            line-height: 1.6;
+        }
+        .hud-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #ff3366;
+            text-shadow: 0 0 10px #ff3366;
+            margin-bottom: 10px;
+        }
+        .status-node {
+            font-size: 13px;
+            text-transform: uppercase;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #00ffcc;
+            font-size: 22px;
+            text-shadow: 0 0 15px #00ffcc;
+            font-weight: bold;
+        }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loading">CONNECTING TO ARMOR MATRIX... ARCHITECTING UI...</div>
+    
+    <div id="hud-overlay">
+        <div class="hud-title">// MARK LXXXV - WEAPON SYSTEMS ACTIVE //</div>
+        <div class="status-node">> SYSTEM LOG: <span id="sys-log" style="color:#fff;">CALIBRATING</span></div>
+        <div class="status-node">> ACTION MODE: <span id="action-mode" style="color:#ffcc00;">IDLE</span></div>
+        <div class="status-node">> SHAPE MATRIX: <span id="shape-matrix">SPHERE</span></div>
+        <div class="status-node">> ENERGETIC VELOCITY: <span id="blast-status">STABLE</span></div>
+    </div>
+
+    <video id="webcam" autoplay playsinline></video>
+
+    <script>
+        // --- CORE SYSTEM VARIABLES ---
+        const BASE_PARTICLES = 4000;
+        const TRAIL_PARTICLES = 1500;
+        const TOTAL_PARTICLES = BASE_PARTICLES + TRAIL_PARTICLES;
+
+        let scene, camera, renderer, particleGeometry, particleSystem;
+        let positions = [], targetPositions = [], originalTargets = [], velocities = [], colors = [];
+        
+        let shapeTemplates = [];
+        const shapeNames = ["SPHERE", "HEART", "SATURN", "ARC REACTOR"];
+        let currentShapeIdx = 0;
+
+        // Interactive States
+        let globalColor = new THREE.Color(0x00ffff);
+        let targetColor = new THREE.Color(0x00ffff);
+        let blastIntensity = 0.0;
+        let lastHandSize = 0.0;
+        let lastSwitchTime = 0;
+        let trailIndex = 0;
+
+        // --- MATH GEOMETRY BUILDERS ---
+        function buildMatrices() {
+            // Matrix 0: Sphere
+            const sphere = [];
+            for(let i=0; i<TOTAL_PARTICLES; i++) {
+                const u = Math.random(), v = Math.random();
+                const theta = u * 2.0 * Math.PI, phi = Math.acos(2.0 * v - 1.0);
+                const r = 3.5;
+                sphere.push(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
+            }
+            shapeTemplates.push(sphere);
+
+            // Matrix 1: Heart
+            const heart = [];
+            for(let i=0; i<TOTAL_PARTICLES; i++) {
+                const t = Math.PI - (Math.random() * Math.PI * 2);
+                const x = 16 * Math.pow(Math.sin(t), 3);
+                const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                const z = (Math.random() - 0.5) * 6;
+                heart.push(x * 0.22, y * 0.22, z * 0.22);
+            }
+            shapeTemplates.push(heart);
+
+            // Matrix 2: Saturn
+            const saturn = [];
+            for(let i=0; i<TOTAL_PARTICLES; i++) {
+                if(i < TOTAL_PARTICLES * 0.45) {
+                    const u = Math.random(), v = Math.random();
+                    const theta = u * 2 * Math.PI, phi = Math.acos(2 * v - 1);
+                    saturn.push(2.2 * Math.sin(phi) * Math.cos(theta), 2.2 * Math.sin(phi) * Math.sin(theta), 2.2 * Math.cos(phi));
+                } else {
+                    const theta = Math.random() * Math.PI * 2;
+                    const r = 4.0 + Math.random() * 3.0;
+                    saturn.push(r * Math.cos(theta), (Math.random() - 0.5) * 0.2, r * Math.sin(theta));
+                }
+            }
+            shapeTemplates.push(saturn);
+
+            // Matrix 3: Iron Man Arc Reactor core
+            const reactor = [];
+            for(let i=0; i<TOTAL_PARTICLES; i++) {
+                if (i < TOTAL_PARTICLES * 0.3) {
+                    const theta = Math.random() * Math.PI * 2;
+                    const r = Math.random() * 1.2;
+                    reactor.push(r * Math.cos(theta), r * Math.sin(theta), (Math.random() - 0.5) * 0.3);
+                } else if (i < TOTAL_PARTICLES * 0.7) {
+                    const theta = Math.random() * Math.PI * 2;
+                    const r = 4.2 + (Math.random() - 0.5) * 0.4;
+                    reactor.push(r * Math.cos(theta), r * Math.sin(theta), (Math.random() - 0.5) * 0.2);
+                } else {
+                    const sector = Math.floor(Math.random() * 3);
+                    const theta = (sector * (2 * Math.PI / 3)) + (Math.random() * 0.6 - 0.3);
+                    const r = 2.2 + Math.random() * 1.5;
+                    reactor.push(r * Math.cos(theta), r * Math.sin(theta), (Math.random() - 0.5) * 0.4);
+                }
+            }
+            shapeTemplates.push(reactor);
+        }
+
+        // --- INIT THREE.JS GRAPHICS ---
+        function initEngine() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 15;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            buildMatrices();
+
+            particleGeometry = new THREE.BufferGeometry();
+            const startShape = shapeTemplates[0];
+
+            for (let i = 0; i < TOTAL_PARTICLES; i++) {
+                positions.push(startShape[i*3], startShape[i*3+1], startShape[i*3+2]);
+                targetPositions.push(startShape[i*3], startShape[i*3+1], startShape[i*3+2]);
+                originalTargets.push(startShape[i*3], startShape[i*3+1], startShape[i*3+2]);
+                
+                // Physics vectors
+                velocities.push(0, 0, 0);
+                colors.push(0, 1, 1);
+            }
+
+            particleGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            particleGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+            const particleMaterial = new THREE.PointsMaterial({
+                size: 0.22,
+                map: createEnergyTexture(),
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                vertexColors: true
+            });
+
+            particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+            scene.add(particleSystem);
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            renderLoop();
+        }
+
+        function createEnergyTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const gradient = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(0,255,255,1)');
+            gradient.addColorStop(0.5, 'rgba(0,128,255,0.4)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = gradient; ctx.fillRect(0, 0, 32, 32);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        // --- MAIN ANIMATION & PHYSICS ENGINE ---
+        function renderLoop() {
+            requestAnimationFrame(renderLoop);
+
+            const posAttr = particleGeometry.attributes.position;
+            const colAttr = particleGeometry.attributes.color;
+
+            // Decay blast intensity over time
+            if (blastIntensity > 0.05) {
+                blastIntensity *= 0.92; // Snap back gradually
+            } else {
+                blastIntensity = 0.0;
+            }
+
+            for (let i = 0; i < TOTAL_PARTICLES; i++) {
+                const idx = i * 3;
+
+                // 1. Repulsor Blast outward force vectors
+                if (blastIntensity > 0.1) {
+                    // Push away from origin point
+                    velocities[idx] += posAttr.array[idx] * blastIntensity * 0.15;
+                    velocities[idx+1] += posAttr.array[idx+1] * blastIntensity * 0.15;
+                    velocities[idx+2] += posAttr.array[idx+2] * blastIntensity * 0.15;
+                }
+
+                // Apply velocity and drag friction
+                posAttr.array[idx] += velocities[idx];
+                posAttr.array[idx+1] += velocities[idx+1];
+                posAttr.array[idx+2] += velocities[idx+2];
+
+                velocities[idx] *= 0.75;
+                velocities[idx+1] *= 0.75;
+                velocities[idx+2] *= 0.75;
+
+                // 2. Smooth Lerp movement back to structural targets
+                posAttr.array[idx] += (targetPositions[idx] - posAttr.array[idx]) * 0.07;
+                posAttr.array[idx+1] += (targetPositions[idx+1] - posAttr.array[idx+1]) * 0.07;
+                posAttr.array[idx+2] += (targetPositions[idx+2] - posAttr.array[idx+2]) * 0.07;
+            }
+
+            // Lerp Color Palette transitions
+            globalColor.lerp(targetColor, 0.04);
+            for (let i = 0; i < TOTAL_PARTICLES; i++) {
+                colAttr.array[i*3] = globalColor.r;
+                colAttr.array[i*3+1] = globalColor.g;
+                colAttr.array[i*3+2] = globalColor.b;
+            }
+
+            posAttr.needsUpdate = true;
+            colAttr.needsUpdate = true;
+
+            // Base spatial rotation drift
+            particleSystem.rotation.y += 0.003;
+            particleSystem.rotation.x += 0.001;
+
+            renderer.render(scene, camera);
+        }
+
+        // --- POWER SECTORS (Action Triggers) ---
+        function morphToShapeMatrix(shapeIdx) {
+            currentShapeIdx = shapeIdx;
+            document.getElementById('shape-matrix').innerText = shapeNames[shapeIdx];
+            const chosen = shapeTemplates[shapeIdx];
+            
+            // Only morph the core base particles, leaving trail buffer isolated
+            for (let i = 0; i < BASE_PARTICLES * 3; i++) {
+                targetPositions[i] = chosen[i];
+                originalTargets[i] = chosen[i];
+            }
+        }
+
+        function executeRepulsorBlast() {
+            blastIntensity = 2.5; 
+            targetColor.setHex(0xff3300); // Shift temporarily to emergency high-yield red
+            document.getElementById('blast-status').innerText = "DISCHARGED";
+            document.getElementById('blast-status').style.color = "#ff3300";
+            
+            setTimeout(() => {
+                document.getElementById('blast-status').innerText = "STABLE";
+                document.getElementById('blast-status').style.color = "#00ffcc";
+            }, 1000);
+        }
+
+        function injectTrailCoordinate(x, y) {
+            // Cycle active index within reserved trail partition array
+            const targetIndex = BASE_PARTICLES + trailIndex;
+            const idx = targetIndex * 3;
+
+            targetPositions[idx] = x;
+            targetPositions[idx+1] = y;
+            targetPositions[idx+2] = (Math.random() - 0.5) * 2; // subtle depth skew
+
+            trailIndex = (trailIndex + 1) % TRAIL_PARTICLES;
+        }
+
+        // --- MEDIAPIPE GESTURE HANDLER MAP ---
+        function processHandTracking(results) {
+            const logNode = document.getElementById('sys-log');
+            const modeNode = document.getElementById('action-mode');
+
+            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+                logNode.innerText = "SEARCHING FOR HOST SIGNATURE...";
+                logNode.style.color = "#ff3366";
+                return;
+            }
+
+            logNode.innerText = "SECURE LINK STABLE";
+            logNode.style.color = "#00ffcc";
+            
+            const hand = results.multiHandLandmarks[0];
+            
+            // Compute structural metrics (Finger Open vs Closed states)
+            const isIndexOpen = hand[8].y < hand[6].y;
+            const isMiddleOpen = hand[12].y < hand[10].y;
+            const isRingOpen = hand[16].y < hand[14].y;
+            const isPinkyOpen = hand[20].y < hand[18].y;
+
+            // Measure hand bounding size to handle forward thrust speed
+            const currentHandSize = Math.abs(hand[0].x - hand[17].x);
+            const handDeltaAcceleration = currentHandSize - lastHandSize;
+            lastHandSize = currentHandSize;
+
+            const timestamp = Date.now();
+
+            // --- FINITE STATE MACHINE SELECTION ---
+            
+            // 1. GESTURE: OPEN PALM PUSH (Repulsor Weapon Shockwave)
+            if (isIndexOpen && isMiddleOpen && isRingOpen && isPinkyOpen) {
+                modeNode.innerText = "REPULSOR CHARGED";
+                modeNode.style.color = "#ff3366";
+                targetColor.setHex(0x00ffff); // Stark Cyan standard glow
+
+                if (handDeltaAcceleration > 0.045) { // Rapid expansion toward optical glass lens
+                    executeRepulsorBlast();
+                }
+            } 
+            // 2. GESTURE: 1 FINGER POINTING (3D Writer Mode)
+            else if (isIndexOpen && !isMiddleOpen && !isRingOpen) {
+                modeNode.innerText = "WRITING PROTOCOL";
+                modeNode.style.color = "#ffcc00";
+                targetColor.setHex(0xffcc00); // Gold signature beam
+
+                // Remap index tip tracking parameters cleanly into perspective viewport metrics
+                const designX = (hand[8].x - 0.5) * -22;
+                const designY = (hand[8].y - 0.5) * -16;
+
+                // Inject stream data directly into physics array matrix loops
+                injectTrailCoordinate(designX, designY);
+            } 
+            // 3. GESTURE: FULL CLOSED FIST (Structural Shape Matrix Selector Loop)
+            else if (!isIndexOpen && !isMiddleOpen && !isRingOpen && !isPinkyOpen) {
+                modeNode.innerText = "MATRIX MORPHING";
+                modeNode.style.color = "#00ffa3";
+
+                if (timestamp - lastSwitchTime > 1300) { // Safety loop debounce switch delay
+                    let nextIdx = (currentShapeIdx + 1) % shapeTemplates.length;
+                    morphToShapeMatrix(nextIdx);
+                    lastSwitchTime = timestamp;
+                }
+            } else {
+                modeNode.innerText = "SYSTEM IDLE";
+                modeNode.style.color = "#a0a0a0";
+            }
+        }
+
+        // --- HARDWARE LIFECYCLE SPIN-UP ---
+        const videoElement = document.getElementById('webcam');
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+        hands.onResults(processHandTracking);
+
+        const cameraInstance = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+            },
+            width: 640,
+            height: 480
+        });
+
+        initEngine();
+        cameraInstance.start().then(() => {
+            document.getElementById('loading').style.display = 'none';
+        });
+    </script>
+</body>
+</html>
